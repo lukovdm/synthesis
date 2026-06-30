@@ -52,7 +52,23 @@ class SynthesizerAR(paynt.synthesizer.synthesizer.Synthesizer):
                     dtmc = self.quotient.build_assignment(assignment)
                 res = dtmc.check_specification(self.quotient.specification)
                 # assert result.primary.value == res.constraints_result.results[index].value, f"Inconsistent results for constraint {index}: {result.primary.value} vs {res.constraints_result.results[index].value}"
-                if res.accepting_dtmc(self.quotient.specification):
+                # accepting_dtmc returns (is_accepting, value); index [0] for the
+                # boolean. Without it the non-empty tuple is always truthy, so a
+                # member that does NOT satisfy the constraint would be wrongly
+                # accepted and returned as the admissible assignment.
+                member_accepting = res.accepting_dtmc(self.quotient.specification)[0]
+                # For conditional properties a member only genuinely satisfies the
+                # constraint if its condition is reachable: otherwise P[A|B] is
+                # 0/0 = inf, which Storm reports as satisfying any P>x bound.
+                if member_accepting and constraint.is_conditional:
+                    condition_operator = stormpy.logic.ProbabilityOperator(
+                        constraint.formula.subformula.conditional_subformula
+                    )
+                    condition_value = stormpy.model_checking(
+                        dtmc.model, condition_operator
+                    ).at(dtmc.model.initial_states[0])
+                    member_accepting = condition_value > 0
+                if member_accepting:
                     result.sat = True
                     admissible_assignment = assignment
 
@@ -60,7 +76,15 @@ class SynthesizerAR(paynt.synthesizer.synthesizer.Synthesizer):
             result.secondary = model.model_check_property(constraint, alt=True)
             if mdp.is_deterministic and result.primary.value != result.secondary.value:
                 logger.warning("WARNING: model is deterministic but min<max")
-            if result.secondary.sat:
+            # The secondary (worst-case) bound claims that *every* member of the
+            # family satisfies the constraint. For a conditional property this
+            # bound is unsound: a member whose condition is unreachable has an
+            # undefined conditional probability (P[A|B] with P[B]=0), which Storm
+            # evaluates as inf and therefore reports as satisfying any P>x bound.
+            # Such a family must not be accepted via the shortcut (which would
+            # return an arbitrary, possibly condition-unreachable member); instead
+            # leave it undecided so it is refined down to verified members.
+            if result.secondary.sat and not constraint.is_conditional:
                 result.sat = True
                 continue
 
